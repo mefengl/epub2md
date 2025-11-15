@@ -1,0 +1,17 @@
+[project]
+name = "epub2md"
+version = "0.1.0"
+description = "Convert EPUB to clean Markdown chapters"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+epub2md = "epub2md:main"
+
+[project.urls]
+Repository = "https://github.com/mefengl/epub2md"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
