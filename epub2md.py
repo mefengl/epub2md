@@ -19,18 +19,19 @@ function Image(el) el.classes={} el.attributes={} return el end
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ['-h', '--help']:
-        print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md <book.epub> [outdir]\n\nOutput:\n  <outdir>/: Markdown chapters\n  <outdir>-media/: Images")
+        print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md <book.epub> [outdir]\n\nOutput:\n  <outdir>/chapters/: Markdown files\n  <outdir>/media/: Images")
         sys.exit(0)
     
     epub = Path(sys.argv[1]).resolve()
-    out = sys.argv[2] if len(sys.argv) > 2 else 'chapters'
+    out = Path(sys.argv[2] if len(sys.argv) > 2 else epub.stem).resolve()
     
     if not epub.exists(): sys.exit(f"Error: {epub} not found")
     if not shutil.which('pandoc'): sys.exit("Error: pandoc not found. Install: brew install pandoc")
     
     print(f"Converting {epub.name}...")
-    outdir = Path(out).resolve()
-    media = Path(f"{out}-media").resolve()
+    out.mkdir(exist_ok=True)
+    outdir = out / 'chapters'
+    media = out / 'media'
     outdir.mkdir(exist_ok=True)
     
     with tempfile.TemporaryDirectory() as tmp:
@@ -71,7 +72,8 @@ def main():
     
     print(f"\nDone! {n} chapters → {out}/")
     if media.exists() and list(media.iterdir()):
-        print(f"Images → {media.name}/")
+        imgs = len(list(media.rglob('*.*')))
+        print(f"{imgs} images → {out}/media/")
 
 if __name__ == '__main__':
     main()
