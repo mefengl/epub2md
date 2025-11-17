@@ -19,7 +19,7 @@ function Image(el) el.classes={} el.attributes={} return el end
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ['-h', '--help']:
-        print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md <book.epub> [outdir]\n\nOutput:\n  <outdir>/chapters/: Markdown files\n  <outdir>/media/: Images")
+        print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md <book.epub> [outdir]\n\nOutput:\n  <outdir>/*.md: Markdown files\n  <outdir>/images/: Images")
         sys.exit(0)
     
     epub = Path(sys.argv[1]).resolve()
@@ -30,9 +30,9 @@ def main():
     
     print(f"Converting {epub.name}...")
     out.mkdir(exist_ok=True)
-    outdir = out / 'chapters'
-    media = out / 'media'
-    outdir.mkdir(exist_ok=True)
+    media = out / 'images'
+    media.mkdir(exist_ok=True)
+    (media / '.gitignore').write_text('*\n')
     
     with tempfile.TemporaryDirectory() as tmp:
         t = Path(tmp)
@@ -58,7 +58,7 @@ def main():
             
             n += 1
             safe = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or 'untitled'
-            name = outdir / f"{n:02d}-{safe}.md"
+            name = out / f"{n:02d}-{safe}.md"
             
             r = subprocess.run([
                 'pandoc', src, '-f', 'html', '-t', 'gfm', '--wrap=none',

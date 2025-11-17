@@ -11,19 +11,21 @@ pip install epub2md
 ## Usage
 
 ```bash
-epub2md book.epub          # Creates book/chapters/ and book/media/
-epub2md book.epub output   # Creates output/chapters/ and output/media/
+epub2md book.epub          # Creates book/*.md and book/images/
+epub2md book.epub output   # Creates output/*.md and output/images/
 ```
 
 Output:
 ```
 book/
-├── chapters/
-│   ├── 01-chapter-i.md
-│   └── ...
-└── media/
+├── 01-chapter-i.md
+├── 02-chapter-ii.md
+├── ...
+└── images/
     └── *.jpeg
 ```
+
+> Images are git-ignored by default. To commit them: `rm book/images/.gitignore`
 
 ## Requirements
 
