@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, os, re, subprocess, tempfile, shutil
+import sys, re, subprocess, tempfile, shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -17,63 +17,239 @@ end
 function Image(el) el.classes={} el.attributes={} return el end
 """
 
+
+def _local_name(tag):
+    return tag.split("}", 1)[-1] if "}" in tag else tag
+
+
+def _find_opf(root):
+    container = root / "META-INF" / "container.xml"
+    if not container.exists():
+        return None
+    try:
+        tree = ET.parse(container)
+    except ET.ParseError:
+        return None
+    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
+    rootfile = tree.find(".//c:rootfile", ns)
+    if rootfile is None:
+        return None
+    full_path = rootfile.attrib.get("full-path")
+    if not full_path:
+        return None
+    opf = root / full_path
+    return opf if opf.exists() else None
+
+
+def _parse_ncx(ncx_path):
+    try:
+        tree = ET.parse(ncx_path)
+    except ET.ParseError:
+        return ncx_path.parent, []
+    ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
+    items = []
+    for nav in tree.findall(".//n:navPoint", ns):
+        te = nav.find(".//n:text", ns)
+        ce = nav.find(".//n:content", ns)
+        if te is None or ce is None:
+            continue
+        title = te.text or "untitled"
+        src = ce.get("src", "").split("#")[0]
+        if not src:
+            continue
+        items.append((title, src))
+    return ncx_path.parent, items
+
+
+def _parse_nav(nav_path):
+    try:
+        tree = ET.parse(nav_path)
+    except ET.ParseError:
+        return nav_path.parent, []
+    root = tree.getroot()
+    navs = [el for el in root.iter() if _local_name(el.tag) == "nav"]
+    nav_el = None
+    for candidate in navs:
+        for attr_name, attr_val in candidate.attrib.items():
+            if _local_name(attr_name) == "type" and "toc" in attr_val:
+                nav_el = candidate
+                break
+        if nav_el is not None:
+            break
+    if nav_el is None and navs:
+        nav_el = navs[0]
+    if nav_el is None:
+        return nav_path.parent, []
+    items = []
+
+    def walk(node):
+        for child in node:
+            name = _local_name(child.tag)
+            if name in ("ol", "ul"):
+                walk(child)
+            elif name == "li":
+                a_el = None
+                for sub in child.iter():
+                    if _local_name(sub.tag) == "a":
+                        a_el = sub
+                        break
+                if a_el is not None:
+                    href = a_el.attrib.get("href", "")
+                    if href:
+                        file_part = href.split("#", 1)[0]
+                        if file_part:
+                            text = "".join(a_el.itertext()).strip()
+                            title = text or "untitled"
+                            items.append((title, file_part))
+                for sub in child:
+                    if _local_name(sub.tag) in ("ol", "ul"):
+                        walk(sub)
+
+    walk(nav_el)
+    return nav_path.parent, items
+
+
+def _find_toc(root):
+    opf = _find_opf(root)
+    if opf is None:
+        return None, []
+    try:
+        tree = ET.parse(opf)
+    except ET.ParseError:
+        return None, []
+    pkg = tree.getroot()
+    ns = {"opf": "http://www.idpf.org/2007/opf"}
+    manifest_el = pkg.find("opf:manifest", ns)
+    if manifest_el is None:
+        return None, []
+    manifest = {}
+    for item in manifest_el:
+        item_id = item.attrib.get("id")
+        if item_id:
+            manifest[item_id] = item
+    spine_el = pkg.find("opf:spine", ns)
+
+    nav_item = None
+    for it in manifest.values():
+        props = it.attrib.get("properties", "")
+        if "nav" in props.split():
+            nav_item = it
+            break
+    if nav_item is not None:
+        href = nav_item.attrib.get("href", "")
+        if href:
+            nav_path = opf.parent / href
+            base_dir, items = _parse_nav(nav_path)
+            if items:
+                return base_dir, items
+
+    ncx_item = None
+    if spine_el is not None:
+        toc_id = spine_el.attrib.get("toc")
+        if toc_id and toc_id in manifest:
+            ncx_item = manifest[toc_id]
+    if ncx_item is None:
+        for it in manifest.values():
+            if it.attrib.get("media-type") == "application/x-dtbncx+xml":
+                ncx_item = it
+                break
+    if ncx_item is not None:
+        href = ncx_item.attrib.get("href", "")
+        if href:
+            ncx_path = opf.parent / href
+            base_dir, items = _parse_ncx(ncx_path)
+            if items:
+                return base_dir, items
+
+    return None, []
+
+
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ['-h', '--help']:
-        print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md <book.epub> [outdir]\n\nOutput:\n  <outdir>/*.md: Markdown files\n  <outdir>/images/: Images")
+    if len(sys.argv) < 2 or sys.argv[1] in ["-h", "--help"]:
+        print(
+            "epub2md - Convert EPUB to Markdown\n\n"
+            "Usage: epub2md <book.epub> [outdir]\n\n"
+            "Output:\n"
+            "  <outdir>/*.md: Markdown files\n"
+            "  <outdir>/images/: Images"
+        )
         sys.exit(0)
-    
+
     epub = Path(sys.argv[1]).resolve()
     out = Path(sys.argv[2] if len(sys.argv) > 2 else epub.stem).resolve()
-    
-    if not epub.exists(): sys.exit(f"Error: {epub} not found")
-    if not shutil.which('pandoc'): sys.exit("Error: pandoc not found. Install: brew install pandoc")
-    
+
+    if not epub.exists():
+        sys.exit(f"Error: {epub} not found")
+    if not shutil.which("pandoc"):
+        sys.exit("Error: pandoc not found. Install: brew install pandoc")
+
     print(f"Converting {epub.name}...")
     out.mkdir(exist_ok=True)
-    media = out / 'images'
+    media = out / "images"
     media.mkdir(exist_ok=True)
-    (media / '.gitignore').write_text('*\n')
-    
+    (media / ".gitignore").write_text("*\n")
+
     with tempfile.TemporaryDirectory() as tmp:
         t = Path(tmp)
-        subprocess.run(['unzip', '-q', str(epub), '-d', str(t)], check=True)
-        (t/'f.lua').write_text(LUA)
-        
-        toc = t/'toc.ncx'
-        if not toc.exists(): sys.exit("Error: toc.ncx not found")
-        
-        tree = ET.parse(toc)
-        ns = {'n': 'http://www.daisy.org/z3986/2005/ncx/'}
-        
+        subprocess.run(["unzip", "-q", str(epub), "-d", str(t)], check=True)
+        (t / "f.lua").write_text(LUA)
+
+        base_dir, items = _find_toc(t)
+        if base_dir is None or not items:
+            sys.exit("Error: toc not found")
+
+        print(f"Found {len(items)} entries in toc")
+
         n = 0
-        for nav in tree.findall('.//n:navPoint', ns):
-            te = nav.find('.//n:text', ns)
-            ce = nav.find('.//n:content', ns)
-            if te is None or ce is None: continue
-            
-            title = te.text or 'untitled'
-            src = ce.get('src', '').split('#')[0]
-            if not src.endswith(('.xhtml', '.html')): continue
-            if not (t/src).exists(): continue
-            
+        seen = set()
+        for title, src in items:
+            if not src.endswith((".xhtml", ".html")):
+                continue
+            html_path = base_dir / src
+            if not html_path.exists():
+                continue
+            key = str(html_path)
+            if key in seen:
+                continue
+            seen.add(key)
+
             n += 1
-            safe = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or 'untitled'
+            safe = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "untitled"
             name = out / f"{n:02d}-{safe}.md"
-            
-            r = subprocess.run([
-                'pandoc', src, '-f', 'html', '-t', 'gfm', '--wrap=none',
-                '--lua-filter', 'f.lua', '--extract-media', str(media), '-o', str(name)
-            ], cwd=t, capture_output=True)
-            
+
+            r = subprocess.run(
+                [
+                    "pandoc",
+                    src,
+                    "-f",
+                    "html",
+                    "-t",
+                    "gfm",
+                    "--wrap=none",
+                    "--lua-filter",
+                    str(t / "f.lua"),
+                    "--extract-media",
+                    str(media),
+                    "-o",
+                    str(name),
+                ],
+                cwd=base_dir,
+                capture_output=True,
+                text=True,
+            )
+
             if r.returncode == 0:
                 print(f"✓ {n:02d} {title}")
             else:
                 print(f"✗ {title}")
-    
+                if r.stderr:
+                    print(f"  Error: {r.stderr[:200]}")
+
     print(f"\nDone! {n} chapters → {out}/")
     if media.exists() and list(media.iterdir()):
-        imgs = len(list(media.rglob('*.*')))
+        imgs = len(list(media.rglob("*.*")))
         print(f"{imgs} images → {out}/media/")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
