@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys, re, subprocess, tempfile, shutil
+from collections import defaultdict
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -54,10 +55,13 @@ def _parse_ncx(ncx_path):
         if te is None or ce is None:
             continue
         title = te.text or "untitled"
-        src = ce.get("src", "").split("#")[0]
-        if not src:
+        href = ce.get("src", "")
+        if not href:
             continue
-        items.append((title, src))
+        file_part, _, fragment = href.partition("#")
+        if not file_part:
+            continue
+        items.append((title, file_part, fragment or None))
     return ncx_path.parent, items
 
 
@@ -96,11 +100,11 @@ def _parse_nav(nav_path):
                 if a_el is not None:
                     href = a_el.attrib.get("href", "")
                     if href:
-                        file_part = href.split("#", 1)[0]
+                        file_part, _, fragment = href.partition("#")
                         if file_part:
                             text = "".join(a_el.itertext()).strip()
                             title = text or "untitled"
-                            items.append((title, file_part))
+                            items.append((title, file_part, fragment or None))
                 for sub in child:
                     if _local_name(sub.tag) in ("ol", "ul"):
                         walk(sub)
@@ -164,6 +168,50 @@ def _find_toc(root):
     return None, []
 
 
+def _find_anchor_position(text, anchor):
+    if not anchor:
+        return None
+    patterns = [
+        f'id="{anchor}"',
+        f"id='{anchor}'",
+        f'name="{anchor}"',
+        f"name='{anchor}'",
+    ]
+    positions = []
+    for pattern in patterns:
+        idx = text.find(pattern)
+        if idx != -1:
+            positions.append(idx)
+    if not positions:
+        return None
+    attr_pos = min(positions)
+    lt_pos = text.rfind("<", 0, attr_pos)
+    return lt_pos if lt_pos != -1 else attr_pos
+
+
+def _extract_html_segment(text, start_id, end_id):
+    if not start_id and not end_id:
+        return None
+
+    start_pos = 0
+    if start_id:
+        s = _find_anchor_position(text, start_id)
+        if s is None:
+            return None
+        start_pos = s
+
+    end_pos = len(text)
+    if end_id:
+        e = _find_anchor_position(text, end_id)
+        if e is not None and e > start_pos:
+            end_pos = e
+
+    if start_pos >= end_pos:
+        return None
+
+    return text[start_pos:end_pos]
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ["-h", "--help"]:
         print(
@@ -200,18 +248,83 @@ def main():
 
         print(f"Found {len(items)} entries in toc")
 
-        n = 0
-        seen = set()
-        for title, src in items:
+        chapters = []
+        for order, item in enumerate(items, start=1):
+            if len(item) == 2:
+                title, src = item
+                fragment = None
+            else:
+                title, src, fragment = item
             if not src.endswith((".xhtml", ".html")):
                 continue
             html_path = base_dir / src
             if not html_path.exists():
                 continue
-            key = str(html_path)
-            if key in seen:
+            chapters.append(
+                {
+                    "order": order,
+                    "title": title,
+                    "src": src,
+                    "fragment": fragment,
+                    "html_path": html_path,
+                    "start_id": None,
+                    "end_id": None,
+                }
+            )
+
+        if not chapters:
+            sys.exit("Error: no html chapters found in toc")
+
+        by_file = defaultdict(list)
+        for ch in chapters:
+            by_file[ch["html_path"]].append(ch)
+
+        for html_path, group in by_file.items():
+            group.sort(key=lambda c: c["order"])
+            any_fragment = any(c["fragment"] for c in group)
+            if not any_fragment:
                 continue
-            seen.add(key)
+            for idx, ch in enumerate(group):
+                frag = ch["fragment"]
+                end_id = None
+                for later in group[idx + 1 :]:
+                    if later["fragment"]:
+                        end_id = later["fragment"]
+                        break
+                if frag:
+                    ch["start_id"] = frag
+                    ch["end_id"] = end_id
+                elif idx == 0 and end_id:
+                    ch["start_id"] = None
+                    ch["end_id"] = end_id
+
+        chapters.sort(key=lambda c: c["order"])
+
+        html_cache = {}
+        n = 0
+        for ch in chapters:
+            title = ch["title"]
+            src = ch["src"]
+            html_path = ch["html_path"]
+            start_id = ch.get("start_id")
+            end_id = ch.get("end_id")
+
+            snippet = None
+            if start_id is not None or end_id is not None:
+                text = html_cache.get(html_path)
+                if text is None:
+                    try:
+                        text = html_path.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        text = html_path.read_text(encoding="utf-8", errors="ignore")
+                    html_cache[html_path] = text
+                snippet = _extract_html_segment(text, start_id, end_id)
+
+            input_arg = src
+            input_text = None
+            if snippet is not None:
+                input_arg = "-"
+                input_text = snippet
 
             n += 1
             safe = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "untitled"
@@ -220,7 +333,7 @@ def main():
             r = subprocess.run(
                 [
                     "pandoc",
-                    src,
+                    input_arg,
                     "-f",
                     "html",
                     "-t",
@@ -236,6 +349,7 @@ def main():
                 cwd=base_dir,
                 capture_output=True,
                 text=True,
+                input=input_text,
             )
 
             if r.returncode == 0:
