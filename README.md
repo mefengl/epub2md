@@ -35,3 +35,7 @@ book/
 ## License
 
 MIT
+
+---
+
+[Discussion on Hacker News](https://news.ycombinator.com/item?id=45951820)
