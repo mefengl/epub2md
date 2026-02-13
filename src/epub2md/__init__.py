@@ -169,6 +169,43 @@ def _find_toc(root):
     return None, []
 
 
+def _find_spine(root):
+    opf = _find_opf(root)
+    if opf is None:
+        return None, []
+    try:
+        tree = ET.parse(opf)
+    except ET.ParseError:
+        return None, []
+    pkg = tree.getroot()
+    ns = {"opf": "http://www.idpf.org/2007/opf"}
+    manifest_el = pkg.find("opf:manifest", ns)
+    if manifest_el is None:
+        return None, []
+    manifest = {}
+    for item in manifest_el:
+        item_id = item.attrib.get("id")
+        if item_id:
+            manifest[item_id] = item
+    spine_el = pkg.find("opf:spine", ns)
+    if spine_el is None:
+        return None, []
+    items = []
+    for itemref in spine_el:
+        if _local_name(itemref.tag) != "itemref":
+            continue
+        idref = itemref.attrib.get("idref")
+        if not idref or idref not in manifest:
+            continue
+        it = manifest[idref]
+        href = it.attrib.get("href", "")
+        media_type = it.attrib.get("media-type", "")
+        if not href or "html" not in media_type:
+            continue
+        items.append(unquote(href))
+    return opf.parent, items
+
+
 def _find_anchor_position(text, anchor):
     if not anchor:
         return None
@@ -244,35 +281,74 @@ def main():
         (t / "f.lua").write_text(LUA)
 
         base_dir, items = _find_toc(t)
-        if base_dir is None or not items:
-            sys.exit("Error: toc not found")
+        spine_dir, spine_files = _find_spine(t)
 
-        print(f"Found {len(items)} entries in toc")
+        use_spine = False
+        if base_dir is not None and items:
+            print(f"Found {len(items)} entries in toc")
 
-        chapters = []
-        for order, item in enumerate(items, start=1):
-            if len(item) == 2:
-                title, src = item
-                fragment = None
-            else:
-                title, src, fragment = item
-            src = unquote(src)
-            if not src.endswith((".xhtml", ".html", ".htm")):
-                continue
-            html_path = base_dir / src
-            if not html_path.exists():
-                continue
-            chapters.append(
-                {
-                    "order": order,
-                    "title": title,
-                    "src": src,
-                    "fragment": fragment,
-                    "html_path": html_path,
-                    "start_id": None,
-                    "end_id": None,
-                }
-            )
+            chapters = []
+            for order, item in enumerate(items, start=1):
+                if len(item) == 2:
+                    title, src = item
+                    fragment = None
+                else:
+                    title, src, fragment = item
+                src = unquote(src)
+                if not src.endswith((".xhtml", ".html", ".htm")):
+                    continue
+                html_path = base_dir / src
+                if not html_path.exists():
+                    continue
+                chapters.append(
+                    {
+                        "order": order,
+                        "title": title,
+                        "src": src,
+                        "fragment": fragment,
+                        "html_path": html_path,
+                        "start_id": None,
+                        "end_id": None,
+                    }
+                )
+
+            if chapters and spine_files:
+                toc_files = {ch["html_path"].resolve() for ch in chapters}
+                spine_resolved = set()
+                for sf in spine_files:
+                    p = (spine_dir / sf).resolve()
+                    if p.exists():
+                        spine_resolved.add(p)
+                if spine_resolved and len(toc_files) < len(spine_resolved) * 0.5:
+                    print(
+                        f"TOC covers {len(toc_files)}/{len(spine_resolved)} spine files, using spine instead"
+                    )
+                    use_spine = True
+        else:
+            use_spine = True
+
+        if use_spine:
+            if spine_dir is None or not spine_files:
+                sys.exit("Error: no toc or spine found")
+            base_dir = spine_dir
+            chapters = []
+            for order, src in enumerate(spine_files, start=1):
+                html_path = base_dir / src
+                if not html_path.exists():
+                    continue
+                title = Path(src).stem
+                chapters.append(
+                    {
+                        "order": order,
+                        "title": title,
+                        "src": src,
+                        "fragment": None,
+                        "html_path": html_path,
+                        "start_id": None,
+                        "end_id": None,
+                    }
+                )
+            print(f"Using spine: {len(chapters)} files")
 
         if not chapters:
             sys.exit("Error: no html chapters found in toc")
