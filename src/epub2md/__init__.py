@@ -206,6 +206,20 @@ def _find_spine(root):
     return opf.parent, items
 
 
+def _extract_title(html_path):
+    try:
+        text = html_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    for tag in ("h1", "h2", "h3"):
+        m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", text, re.DOTALL | re.IGNORECASE)
+        if m:
+            inner = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+            if inner:
+                return inner
+    return None
+
+
 def _find_anchor_position(text, anchor):
     if not anchor:
         return None
@@ -336,7 +350,7 @@ def main():
                 html_path = base_dir / src
                 if not html_path.exists():
                     continue
-                title = Path(src).stem
+                title = _extract_title(html_path) or Path(src).stem
                 chapters.append(
                     {
                         "order": order,
