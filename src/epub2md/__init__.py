@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys, re, subprocess, tempfile, shutil
 from collections import defaultdict
+from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -255,7 +256,8 @@ def main():
                 fragment = None
             else:
                 title, src, fragment = item
-            if not src.endswith((".xhtml", ".html")):
+            src = unquote(src)
+            if not src.endswith((".xhtml", ".html", ".htm")):
                 continue
             html_path = base_dir / src
             if not html_path.exists():
@@ -328,6 +330,7 @@ def main():
 
             n += 1
             safe = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "untitled"
+            safe = safe[:60].rstrip("-")
             name = out / f"{n:02d}-{safe}.md"
 
             r = subprocess.run(
