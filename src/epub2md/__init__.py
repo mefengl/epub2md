@@ -432,6 +432,11 @@ def main():
             )
 
             if r.returncode == 0:
+                md_text = name.read_text(encoding="utf-8")
+                abs_media = str(media) + "/"
+                if abs_media in md_text:
+                    md_text = md_text.replace(abs_media, "images/")
+                    name.write_text(md_text, encoding="utf-8")
                 print(f"✓ {n:02d} {title}")
             else:
                 print(f"✗ {title}")
