@@ -1,6 +1,6 @@
 [project]
 name = "epub2md"
-version = "0.2.1"
+version = "0.2.2"
 description = "Convert EPUB to clean Markdown chapters"
 readme = "README.md"
 requires-python = ">=3.8"
