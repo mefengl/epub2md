@@ -60,6 +60,40 @@ def _parse_ncx(ncx_path, max_depth=0):
   if navmap is not None: walk(navmap)
   return ncx_path.parent, items
 
+def _ncx_depth_counts(ncx_path):
+  """Count TOC entries at each depth level."""
+  if not (tree := _parse_xml(ncx_path)): return {}
+  ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
+  counts = {}
+  def walk(parent, depth=1):
+    for nav in parent:
+      if _ln(nav.tag) != "navPoint": continue
+      counts[depth] = counts.get(depth, 0) + 1
+      walk(nav, depth + 1)
+  navmap = tree.find(".//n:navMap", ns)
+  if navmap is not None: walk(navmap)
+  return counts
+
+def _nav_depth_counts(nav_path):
+  """Count TOC entries at each depth level for EPUB3 nav."""
+  if not (tree := _parse_xml(nav_path)): return {}
+  navs = [el for el in tree.getroot().iter() if _ln(el.tag) == "nav"]
+  nav_el = next((c for c in navs for k, v in c.attrib.items() if _ln(k) == "type" and "toc" in v), None)
+  if nav_el is None: nav_el = navs[0] if navs else None
+  if nav_el is None: return {}
+  counts = {}
+  def walk(node, depth=1):
+    for child in node:
+      name = _ln(child.tag)
+      if name in ("ol", "ul"): walk(child, depth)
+      elif name == "li":
+        a = next((s for s in child.iter() if _ln(s.tag) == "a"), None)
+        if a: counts[depth] = counts.get(depth, 0) + 1
+        for sub in child:
+          if _ln(sub.tag) in ("ol", "ul"): walk(sub, depth + 1)
+  walk(nav_el)
+  return counts
+
 def _parse_nav(nav_path, max_depth=0):
   if not (tree := _parse_xml(nav_path)): return nav_path.parent, []
   navs = [el for el in tree.getroot().iter() if _ln(el.tag) == "nav"]
@@ -84,20 +118,34 @@ def _parse_nav(nav_path, max_depth=0):
 
 def _find_toc(root, max_depth=0):
   opf, manifest, spine_el = _parse_opf(root)
-  if opf is None: return None, []
+  if opf is None: return None, [], 0
+  depth_counts = {}
   # try EPUB3 nav
   for it in manifest.values():
     if "nav" in it.attrib.get("properties", "").split() and (href := it.attrib.get("href")):
-      base, items = _parse_nav(opf.parent / href, max_depth)
-      if items: return base, items
+      depth_counts = _nav_depth_counts(opf.parent / href)
+      auto = _auto_depth(depth_counts) if max_depth == 0 else max_depth
+      base, items = _parse_nav(opf.parent / href, auto)
+      if items: return base, items, auto
   # try NCX
   ncx = None
   if spine_el is not None and (tid := spine_el.attrib.get("toc")) and tid in manifest: ncx = manifest[tid]
   if ncx is None: ncx = next((it for it in manifest.values() if it.attrib.get("media-type") == "application/x-dtbncx+xml"), None)
   if ncx is not None and (href := ncx.attrib.get("href")):
-    base, items = _parse_ncx(opf.parent / href, max_depth)
-    if items: return base, items
-  return None, []
+    depth_counts = _ncx_depth_counts(opf.parent / href)
+    auto = _auto_depth(depth_counts) if max_depth == 0 else max_depth
+    base, items = _parse_ncx(opf.parent / href, auto)
+    if items: return base, items, auto
+  return None, [], 0
+
+def _auto_depth(depth_counts):
+  """Pick the shallowest depth with >= 3 entries, capping at 50 total."""
+  if not depth_counts: return 0
+  cumulative = 0
+  for d in sorted(depth_counts):
+    cumulative += depth_counts[d]
+    if cumulative >= 3: return d
+  return 0
 
 def _find_spine(root):
   opf, manifest, spine_el = _parse_opf(root)
@@ -139,11 +187,11 @@ def _extract_segment(text, start_id, end_id):
 
 def main():
   if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-    print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md [--depth N] <book.epub> [outdir]\n\n  --depth N  TOC depth limit (1=chapters only, 0=all, default: 0)\n\nOutput:\n  <outdir>/*.md: Markdown files\n  <outdir>/images/: Images")
+    print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md <book.epub> [outdir]\n\nOutput:\n  <outdir>/*.md: Markdown files\n  <outdir>/images/: Images\n\nAuto-detects optimal TOC depth for chapter splitting.")
     sys.exit(0)
 
   args = sys.argv[1:]
-  max_depth = 0
+  max_depth = 0  # 0 = auto-detect
   if "--depth" in args:
     di = args.index("--depth")
     max_depth = int(args[di + 1])
@@ -165,7 +213,7 @@ def main():
     subprocess.run(["unzip", "-q", str(epub), "-d", str(t)], check=True)
     (t / "f.lua").write_text(LUA)
 
-    base_dir, items = _find_toc(t, max_depth)
+    base_dir, items, effective_depth = _find_toc(t, max_depth)
     spine_dir, spine_files = _find_spine(t)
 
     # build chapters from TOC
@@ -179,8 +227,8 @@ def main():
         hp = base_dir / src
         if not hp.exists(): continue
         chapters.append({"order": i, "title": title, "src": src, "fragment": frag, "html_path": hp, "start_id": None, "end_id": None})
-      # check coverage (skip when depth is explicitly limited)
-      if chapters and spine_files and max_depth == 0:
+      # check coverage (skip when depth was auto-limited or explicitly limited)
+      if chapters and spine_files and effective_depth == 0:
         toc_files = {ch["html_path"].resolve() for ch in chapters}
         spine_resolved = {(spine_dir / sf).resolve() for sf in spine_files if (spine_dir / sf).exists()}
         if spine_resolved and len(toc_files) < len(spine_resolved) * 0.5:
@@ -213,7 +261,7 @@ def main():
         elif i == 0 and end_id: ch["end_id"] = end_id
 
     # merge spine files into chapters when depth-limited TOC covers subset
-    if max_depth > 0 and not use_spine and chapters and spine_dir and spine_files:
+    if effective_depth > 0 and not use_spine and chapters and spine_dir and spine_files:
       spine_resolved = [(spine_dir / sf).resolve() for sf in spine_files if (spine_dir / sf).exists()]
       spine_idx = {p: i for i, p in enumerate(spine_resolved)}
       ch_positions = []
