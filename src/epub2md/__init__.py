@@ -41,54 +41,61 @@ def _parse_opf(root):
   spine_el = pkg.find("opf:spine", ns)
   return opf, manifest, spine_el
 
-def _parse_ncx(ncx_path):
+def _parse_ncx(ncx_path, max_depth=0):
   if not (tree := _parse_xml(ncx_path)): return ncx_path.parent, []
   ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
   items = []
-  for nav in tree.findall(".//n:navPoint", ns):
-    te, ce = nav.find(".//n:text", ns), nav.find(".//n:content", ns)
-    if te is None or ce is None: continue
-    href = ce.get("src", "")
-    if not href: continue
-    fp, _, frag = href.partition("#")
-    if fp: items.append((te.text or "untitled", fp, frag or None))
+  def walk(parent, depth=1):
+    for nav in parent:
+      if _ln(nav.tag) != "navPoint": continue
+      te, ce = nav.find("n:navLabel/n:text", ns), nav.find("n:content", ns)
+      if te is not None and ce is not None:
+        href = ce.get("src", "")
+        if href:
+          fp, _, frag = href.partition("#")
+          if fp: items.append((te.text or "untitled", fp, frag or None))
+      if max_depth == 0 or depth < max_depth:
+        walk(nav, depth + 1)
+  navmap = tree.find(".//n:navMap", ns)
+  if navmap is not None: walk(navmap)
   return ncx_path.parent, items
 
-def _parse_nav(nav_path):
+def _parse_nav(nav_path, max_depth=0):
   if not (tree := _parse_xml(nav_path)): return nav_path.parent, []
   navs = [el for el in tree.getroot().iter() if _ln(el.tag) == "nav"]
   nav_el = next((c for c in navs for k, v in c.attrib.items() if _ln(k) == "type" and "toc" in v), None)
   if nav_el is None: nav_el = navs[0] if navs else None
   if nav_el is None: return nav_path.parent, []
   items = []
-  def walk(node):
+  def walk(node, depth=1):
     for child in node:
       name = _ln(child.tag)
-      if name in ("ol", "ul"): walk(child)
+      if name in ("ol", "ul"): walk(child, depth)
       elif name == "li":
         a = next((s for s in child.iter() if _ln(s.tag) == "a"), None)
         if a and (href := a.attrib.get("href", "")):
           fp, _, frag = href.partition("#")
           if fp: items.append(("".join(a.itertext()).strip() or "untitled", fp, frag or None))
-        for sub in child:
-          if _ln(sub.tag) in ("ol", "ul"): walk(sub)
+        if max_depth == 0 or depth < max_depth:
+          for sub in child:
+            if _ln(sub.tag) in ("ol", "ul"): walk(sub, depth + 1)
   walk(nav_el)
   return nav_path.parent, items
 
-def _find_toc(root):
+def _find_toc(root, max_depth=0):
   opf, manifest, spine_el = _parse_opf(root)
   if opf is None: return None, []
   # try EPUB3 nav
   for it in manifest.values():
     if "nav" in it.attrib.get("properties", "").split() and (href := it.attrib.get("href")):
-      base, items = _parse_nav(opf.parent / href)
+      base, items = _parse_nav(opf.parent / href, max_depth)
       if items: return base, items
   # try NCX
   ncx = None
   if spine_el is not None and (tid := spine_el.attrib.get("toc")) and tid in manifest: ncx = manifest[tid]
   if ncx is None: ncx = next((it for it in manifest.values() if it.attrib.get("media-type") == "application/x-dtbncx+xml"), None)
   if ncx is not None and (href := ncx.attrib.get("href")):
-    base, items = _parse_ncx(opf.parent / href)
+    base, items = _parse_ncx(opf.parent / href, max_depth)
     if items: return base, items
   return None, []
 
@@ -132,11 +139,18 @@ def _extract_segment(text, start_id, end_id):
 
 def main():
   if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-    print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md <book.epub> [outdir]\n\nOutput:\n  <outdir>/*.md: Markdown files\n  <outdir>/images/: Images")
+    print("epub2md - Convert EPUB to Markdown\n\nUsage: epub2md [--depth N] <book.epub> [outdir]\n\n  --depth N  TOC depth limit (1=chapters only, 0=all, default: 0)\n\nOutput:\n  <outdir>/*.md: Markdown files\n  <outdir>/images/: Images")
     sys.exit(0)
 
-  epub = Path(sys.argv[1]).resolve()
-  out = Path(sys.argv[2] if len(sys.argv) > 2 else epub.stem).resolve()
+  args = sys.argv[1:]
+  max_depth = 0
+  if "--depth" in args:
+    di = args.index("--depth")
+    max_depth = int(args[di + 1])
+    args = args[:di] + args[di + 2:]
+
+  epub = Path(args[0]).resolve()
+  out = Path(args[1] if len(args) > 1 else epub.stem).resolve()
   if not epub.exists(): sys.exit(f"Error: {epub} not found")
   if not shutil.which("pandoc"): sys.exit("Error: pandoc not found")
 
@@ -151,7 +165,7 @@ def main():
     subprocess.run(["unzip", "-q", str(epub), "-d", str(t)], check=True)
     (t / "f.lua").write_text(LUA)
 
-    base_dir, items = _find_toc(t)
+    base_dir, items = _find_toc(t, max_depth)
     spine_dir, spine_files = _find_spine(t)
 
     # build chapters from TOC
@@ -165,8 +179,8 @@ def main():
         hp = base_dir / src
         if not hp.exists(): continue
         chapters.append({"order": i, "title": title, "src": src, "fragment": frag, "html_path": hp, "start_id": None, "end_id": None})
-      # check coverage
-      if chapters and spine_files:
+      # check coverage (skip when depth is explicitly limited)
+      if chapters and spine_files and max_depth == 0:
         toc_files = {ch["html_path"].resolve() for ch in chapters}
         spine_resolved = {(spine_dir / sf).resolve() for sf in spine_files if (spine_dir / sf).exists()}
         if spine_resolved and len(toc_files) < len(spine_resolved) * 0.5:
@@ -198,16 +212,48 @@ def main():
         if ch["fragment"]: ch["start_id"], ch["end_id"] = ch["fragment"], end_id
         elif i == 0 and end_id: ch["end_id"] = end_id
 
+    # merge spine files into chapters when depth-limited TOC covers subset
+    if max_depth > 0 and not use_spine and chapters and spine_dir and spine_files:
+      spine_resolved = [(spine_dir / sf).resolve() for sf in spine_files if (spine_dir / sf).exists()]
+      spine_idx = {p: i for i, p in enumerate(spine_resolved)}
+      ch_positions = []
+      for ch in chapters:
+        idx = spine_idx.get(ch["html_path"].resolve())
+        ch_positions.append(idx)
+      # assign spine file ranges to each chapter
+      for ci, ch in enumerate(chapters):
+        start = ch_positions[ci]
+        if start is None: continue
+        # find next chapter's spine position
+        end = len(spine_resolved)
+        for nci in range(ci + 1, len(chapters)):
+          if ch_positions[nci] is not None:
+            end = ch_positions[nci]
+            break
+        extra = [spine_resolved[j] for j in range(start + 1, end)]
+        if extra:
+          ch["_extra_files"] = extra
+
     # convert each chapter
     chapters.sort(key=lambda c: c["order"])
     abs_prefix = str(media) + "/"
     n = 0
     for ch in chapters:
       snippet = None
+      extra_files = ch.get("_extra_files", [])
+
       if ch["start_id"] is not None or ch["end_id"] is not None:
         try: text = ch["html_path"].read_text(encoding="utf-8", errors="ignore")
         except OSError: text = ""
         snippet = _extract_segment(text, ch["start_id"], ch["end_id"])
+
+      # merge multiple spine files into one HTML for pandoc
+      if extra_files and snippet is None:
+        parts = []
+        for fp in [ch["html_path"]] + extra_files:
+          try: parts.append(fp.read_text(encoding="utf-8", errors="ignore"))
+          except OSError: pass
+        snippet = "\n".join(parts)
 
       n += 1
       safe = re.sub(r"[^a-z0-9]+", "-", ch["title"].lower()).strip("-")[:60].rstrip("-") or "untitled"
