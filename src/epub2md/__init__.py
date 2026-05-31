@@ -37,7 +37,7 @@ def _parse_opf(root):
   ns = {"opf": "http://www.idpf.org/2007/opf"}
   pkg = tree.getroot()
   mel = pkg.find("opf:manifest", ns)
-  manifest = {item.attrib["id"]: item for item in (mel or []) if "id" in item.attrib}
+  manifest = {item.attrib["id"]: item for item in (mel if mel is not None else []) if "id" in item.attrib}
   spine_el = pkg.find("opf:spine", ns)
   return opf, manifest, spine_el
 
