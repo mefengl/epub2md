@@ -295,10 +295,11 @@ def main():
         except OSError: text = ""
         snippet = _extract_segment(text, ch["start_id"], ch["end_id"])
 
-      # merge multiple spine files into one HTML for pandoc
-      if extra_files and snippet is None:
-        parts = []
-        for fp in [ch["html_path"]] + extra_files:
+      # merge subsequent spine files after the fragment (or the whole first file)
+      if extra_files:
+        parts = [snippet] if snippet is not None else []
+        first = [] if snippet is not None else [ch["html_path"]]
+        for fp in first + extra_files:
           try: parts.append(fp.read_text(encoding="utf-8", errors="ignore"))
           except OSError: pass
         snippet = "\n".join(parts)
