@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, re, subprocess, tempfile, shutil
+import sys, re, subprocess, tempfile, shutil, unicodedata
 from collections import defaultdict
 from urllib.parse import unquote
 import xml.etree.ElementTree as ET
@@ -161,11 +161,15 @@ def _find_spine(root):
   return opf.parent, items
 
 def _chapter_filename(title: str, index: int) -> str:
-  safe = re.sub(r"[^\w\-]+", "-", title.strip(), flags=re.UNICODE)
+  title = unicodedata.normalize("NFC", title.strip().lower())
+  safe = "".join(c if c.isalnum() or unicodedata.category(c).startswith("M") else "-" for c in title)
   safe = re.sub(r"-+", "-", safe).strip("-")
   if not safe:
     safe = "untitled"
-  return f"{index:02d}-{safe}.md"
+  prefix, suffix = f"{index:02d}-", ".md"
+  budget = 255 - len((prefix + suffix).encode("utf-8"))
+  safe = safe.encode("utf-8")[:budget].decode("utf-8", errors="ignore").rstrip("-") or "untitled"
+  return f"{prefix}{safe}{suffix}"
 
 
 def _extract_title(path):
