@@ -206,7 +206,10 @@ def main():
   max_depth = 0  # 0 = auto-detect
   if "--depth" in args:
     di = args.index("--depth")
-    max_depth = int(args[di + 1])
+    try:
+      max_depth = int(args[di + 1])
+    except (IndexError, ValueError):
+      sys.exit("Error: --depth requires an integer value")
     args = args[:di] + args[di + 2:]
 
   epub = Path(args[0]).resolve()
